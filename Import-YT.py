@@ -1,4 +1,8 @@
-import os, shutil, yt_dlp
+import glob
+import os
+import shutil
+
+import yt_dlp
 OUTPUT_DIR = os.path.join(os.getcwd(), "descargas")
 
 def get_best_video_format(info_dict):
@@ -33,13 +37,12 @@ def list_available_formats(info_dict):
     formats = info_dict.get("formats") or []
     if not formats:
         print("No se encontraron formatos descargables.")
-        return
+        return []
 
     sorted_formats = sorted(
         (
             fmt for fmt in formats
-            if is_mp4_compatible(fmt)
-            and (
+            if (
                 fmt.get("vcodec") not in (None, "none")
                 or fmt.get("acodec") not in (None, "none")
             )
@@ -54,7 +57,7 @@ def list_available_formats(info_dict):
         reverse=True,
     )
 
-    print("\nTodos los formatos MP4 disponibles (audio M4A compatible incluido):")
+    print("\nTodos los formatos disponibles:")
     print("  ID | Tipo | Resolucion | FPS | Extension | Video | Audio | Bitrate | Tamano")
     for fmt in sorted_formats:
         has_video = fmt.get("vcodec") not in (None, "none")
@@ -82,6 +85,51 @@ def list_available_formats(info_dict):
             f"{format_size(fmt)}"
         )
 
+    return sorted_formats
+
+
+def select_video_and_audio(formats):
+    formats_by_id = {
+        str(fmt.get("format_id")): fmt
+        for fmt in formats
+    }
+    video_formats = {
+        format_id: fmt
+        for format_id, fmt in formats_by_id.items()
+        if fmt.get("vcodec") not in (None, "none")
+        and fmt.get("height") is not None
+    }
+    audio_formats = {
+        str(fmt.get("format_id")): fmt
+        for fmt in formats
+        if fmt.get("acodec") not in (None, "none")
+        and fmt.get("vcodec") in (None, "none")
+    }
+
+    if not video_formats:
+        raise ValueError("No hay formatos de video disponibles.")
+
+    print("\nSelecciona un formato de video.")
+    video_id = input("ID de video (o 'q' para cancelar): ").strip()
+    if video_id.lower() == "q":
+        raise SystemExit("Descarga cancelada.")
+    if video_id not in formats_by_id or video_id not in video_formats:
+        raise ValueError(f"El ID de video '{video_id}' no existe o no es un formato de video.")
+
+    if formats_by_id[video_id].get("acodec") not in (None, "none"):
+        return video_id, None
+
+    if not audio_formats:
+        raise ValueError("El formato elegido no tiene audio y no hay audios disponibles.")
+
+    audio_id = input("ID de audio (o 'q' para cancelar): ").strip()
+    if audio_id.lower() == "q":
+        raise SystemExit("Descarga cancelada.")
+    if audio_id not in audio_formats:
+        raise ValueError(f"El ID de audio '{audio_id}' no existe o no es un formato de audio.")
+
+    return video_id, audio_id
+
 url = input("Introduce la URL del video de YT: ").strip()
 
 if not url:
@@ -91,35 +139,45 @@ if not url:
 try:
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+    chrome_data_dir = os.path.expanduser(
+        "~/Library/Application Support/Google/Chrome"
+    )
+    chrome_cookie_databases = glob.glob(
+        os.path.join(chrome_data_dir, "*", "Cookies")
+    )
     browser = None
-    if shutil.which("google-chrome") or shutil.which("chrome"):
+    if (shutil.which("google-chrome") or shutil.which("chrome")) and chrome_cookie_databases:
+        browser = "chrome"
+    elif chrome_cookie_databases:
         browser = "chrome"
 
     ydl_opts = {
-        "format": "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]",
-        "merge_output_format": "mp4",
         "outtmpl": os.path.join(OUTPUT_DIR, "%(title)s.%(ext)s"),
         "noplaylist": True,
         "js_runtimes": {"node": {}},
-        "extractor_args": {"youtube": {"player_client": ["web", "android"]}},
+        "retries": 10,
+        "fragment_retries": 10,
+        "http_chunk_size": 10 * 1024 * 1024,
     }
 
     if browser:
         ydl_opts["cookiesfrombrowser"] = (browser,)
 
-    print("\nSeleccionando la mejor calidad disponible...")
+    print("\nSelecciona la calidad que quieres descargar...")
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info_dict = ydl.extract_info(url, download=False)
-        list_available_formats(info_dict)
-        best_video = get_best_video_format(info_dict)
-        if best_video:
-            print(
-                f"\nDescargando en calidad: "
-                f"{best_video.get('height', 'unknown')}p @ {best_video.get('fps', 'unknown')}fps"
-            )
-        else:
-            print("\nNo se encontraron formatos de video con resolución disponible.")
+        formats = list_available_formats(info_dict)
+
+    video_id, audio_id = select_video_and_audio(formats)
+    selected_format = video_id if audio_id is None else f"{video_id}+{audio_id}"
+    print(f"\nDescargando los formatos seleccionados: {selected_format}")
+
+    ydl_opts.update({
+        "format": selected_format,
+        "merge_output_format": "mp4",
+    })
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
 
     print("Descarga completada!")
