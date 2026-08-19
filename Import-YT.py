@@ -22,6 +22,13 @@ def format_size(fmt):
     return f"{size / 1024 / 1024:.1f} MiB"
 
 
+def is_mp4_compatible(fmt):
+    return fmt.get("ext") == "mp4" or (
+        fmt.get("ext") == "m4a"
+        and fmt.get("vcodec") in (None, "none")
+    )
+
+
 def list_available_formats(info_dict):
     formats = info_dict.get("formats") or []
     if not formats:
@@ -31,8 +38,11 @@ def list_available_formats(info_dict):
     sorted_formats = sorted(
         (
             fmt for fmt in formats
-            if fmt.get("vcodec") not in (None, "none")
-            or fmt.get("acodec") not in (None, "none")
+            if is_mp4_compatible(fmt)
+            and (
+                fmt.get("vcodec") not in (None, "none")
+                or fmt.get("acodec") not in (None, "none")
+            )
         ),
         key=lambda fmt: (
             fmt.get("height") or 0,
@@ -44,7 +54,7 @@ def list_available_formats(info_dict):
         reverse=True,
     )
 
-    print("\nTodos los formatos disponibles:")
+    print("\nTodos los formatos MP4 disponibles (audio M4A compatible incluido):")
     print("  ID | Tipo | Resolucion | FPS | Extension | Video | Audio | Bitrate | Tamano")
     for fmt in sorted_formats:
         has_video = fmt.get("vcodec") not in (None, "none")
@@ -86,7 +96,7 @@ try:
         browser = "chrome"
 
     ydl_opts = {
-        "format": "bv*+ba/b",
+        "format": "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]",
         "merge_output_format": "mp4",
         "outtmpl": os.path.join(OUTPUT_DIR, "%(title)s.%(ext)s"),
         "noplaylist": True,
