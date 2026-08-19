@@ -1,9 +1,13 @@
 import glob
 import os
 import shutil
+from datetime import datetime
 
 import yt_dlp
+from yt_dlp.utils import DownloadError
+
 OUTPUT_DIR = os.path.join(os.getcwd(), "descargas")
+LOG_FILE = os.path.join(os.getcwd(), "descargas.log")
 
 def get_best_video_format(info_dict):
     formats = info_dict.get("formats") or []
@@ -33,33 +37,14 @@ def is_mp4_compatible(fmt):
     )
 
 
-def list_available_formats(info_dict):
-    formats = info_dict.get("formats") or []
+def print_format_table(title, formats):
     if not formats:
-        print("No se encontraron formatos descargables.")
-        return []
+        print(f"\n{title}: no disponibles.")
+        return
 
-    sorted_formats = sorted(
-        (
-            fmt for fmt in formats
-            if (
-                fmt.get("vcodec") not in (None, "none")
-                or fmt.get("acodec") not in (None, "none")
-            )
-        ),
-        key=lambda fmt: (
-            fmt.get("height") or 0,
-            fmt.get("fps") or 0,
-            fmt.get("tbr") or 0,
-            fmt.get("acodec") != "none",
-            fmt.get("format_id", ""),
-        ),
-        reverse=True,
-    )
-
-    print("\nTodos los formatos disponibles:")
+    print(f"\n{title}:")
     print("  ID | Tipo | Resolucion | FPS | Extension | Video | Audio | Bitrate | Tamano")
-    for fmt in sorted_formats:
+    for fmt in formats:
         has_video = fmt.get("vcodec") not in (None, "none")
         has_audio = fmt.get("acodec") not in (None, "none")
         if has_video and has_audio:
@@ -84,6 +69,42 @@ def list_available_formats(info_dict):
             f"{audio_codec:15} | {str(bitrate):>7} | "
             f"{format_size(fmt)}"
         )
+
+
+def list_available_formats(info_dict):
+    formats = info_dict.get("formats") or []
+    if not formats:
+        print("No se encontraron formatos descargables.")
+        return []
+
+    sorted_formats = sorted(
+        (
+            fmt for fmt in formats
+            if (
+                fmt.get("vcodec") not in (None, "none")
+                or fmt.get("acodec") not in (None, "none")
+            )
+        ),
+        key=lambda fmt: (
+            fmt.get("height") or 0,
+            fmt.get("fps") or 0,
+            fmt.get("tbr") or 0,
+            fmt.get("acodec") != "none",
+            fmt.get("format_id", ""),
+        ),
+        reverse=True,
+    )
+
+    video_formats = [
+        fmt for fmt in sorted_formats
+        if fmt.get("vcodec") not in (None, "none")
+    ]
+    audio_formats = [
+        fmt for fmt in sorted_formats
+        if fmt.get("acodec") not in (None, "none")
+        and fmt.get("vcodec") in (None, "none")
+    ]
+    print_format_table("Formatos de video disponibles", video_formats)
 
     return sorted_formats
 
@@ -122,6 +143,7 @@ def select_video_and_audio(formats):
     if not audio_formats:
         raise ValueError("El formato elegido no tiene audio y no hay audios disponibles.")
 
+    print_format_table("Formatos de audio disponibles", list(audio_formats.values()))
     audio_id = input("ID de audio (o 'q' para cancelar): ").strip()
     if audio_id.lower() == "q":
         raise SystemExit("Descarga cancelada.")
@@ -129,6 +151,61 @@ def select_video_and_audio(formats):
         raise ValueError(f"El ID de audio '{audio_id}' no existe o no es un formato de audio.")
 
     return video_id, audio_id
+
+
+def log_download_error(url, format_selector, error):
+    error_text = str(error).replace("\n", " ")
+    with open(LOG_FILE, "a", encoding="utf-8") as log_file:
+        log_file.write(
+            f"{datetime.now().isoformat(timespec='seconds')} | "
+            f"url={url} | formato={format_selector} | "
+            f"tipo={type(error).__name__} | error={error_text}\n"
+        )
+
+
+def error_category(error):
+    error_text = str(error).lower()
+    if "403" in error_text or "forbidden" in error_text:
+        return "403 (URL bloqueada o caducada)"
+    if "ffmpeg" in error_text or "postprocess" in error_text:
+        return "postprocesado/ffmpeg"
+    if "cookie" in error_text:
+        return "cookies del navegador"
+    if "javascript" in error_text or "challenge" in error_text:
+        return "desafio JavaScript"
+    return "descarga o extractor"
+
+
+def download_with_recovery(url, selected_format, ydl_opts):
+    fallback_format = "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/b[ext=mp4]"
+    attempts = [
+        (selected_format, "seleccion original"),
+        (selected_format, "reintento con URLs renovadas"),
+        (fallback_format, "fallback MP4/M4A hasta 1080p"),
+    ]
+
+    last_error = None
+    for format_selector, description in attempts:
+        attempt_opts = dict(ydl_opts)
+        attempt_opts.update({
+            "format": format_selector,
+            "merge_output_format": "mp4",
+        })
+        print(f"\nIntento de descarga: {description} ({format_selector})")
+        try:
+            with yt_dlp.YoutubeDL(attempt_opts) as ydl:
+                result = ydl.download([url])
+            if result not in (None, 0):
+                raise DownloadError(f"yt-dlp termino con codigo {result}")
+            return format_selector
+        except DownloadError as error:
+            last_error = error
+            log_download_error(url, format_selector, error)
+            print(f"Error clasificado como {error_category(error)}.")
+            if format_selector != fallback_format:
+                print("Se descartaran las URLs anteriores y se probara otra extraccion.")
+
+    raise last_error
 
 url = input("Introduce la URL del video de YT: ").strip()
 
@@ -173,14 +250,15 @@ try:
     selected_format = video_id if audio_id is None else f"{video_id}+{audio_id}"
     print(f"\nDescargando los formatos seleccionados: {selected_format}")
 
-    ydl_opts.update({
-        "format": selected_format,
-        "merge_output_format": "mp4",
-    })
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download([url])
+    downloaded_format = download_with_recovery(url, selected_format, ydl_opts)
 
-    print("Descarga completada!")
+    print(f"Descarga completada con el formato: {downloaded_format}")
 
-except Exception as e:
-    print(f"Ha ocurrido un error durante la descarga: {e}")
+except DownloadError as error:
+    log_download_error(url, "flujo principal", error)
+    print(f"No se pudo completar la descarga ({error_category(error)}): {error}")
+    print(f"Revisa el diagnostico en: {LOG_FILE}")
+except (OSError, ValueError) as error:
+    log_download_error(url, "flujo principal", error)
+    print(f"No se pudo completar la descarga: {error}")
+    print(f"Revisa el diagnostico en: {LOG_FILE}")
